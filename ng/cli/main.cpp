@@ -6,6 +6,7 @@
 #include "slowhttp/attacks/range.hpp"
 #include "slowhttp/attacks/slow_body.hpp"
 #include "slowhttp/attacks/expect_continue.hpp"
+#include "slowhttp/attacks/connect_only.hpp"
 #include "slowhttp/attacks/slow_tls.hpp"
 #include "slowhttp/attacks/slow_quic.hpp"
 #include "slowhttp/attacks/slow_headers.hpp"
@@ -74,6 +75,14 @@ int main(int argc, char** argv) {
                      st->declared_size());
       break;
     }
+    case slowhttp::Mode::ConnectOnly:
+      attack.reset(new slowhttp::ConnectOnly(cfg));
+      if (cfg.log_level >= 1)
+        std::fprintf(stderr,
+                     "  connect only: each connection is opened and held in"
+                     " silence; nothing is ever sent on it%s\n",
+                     cfg.target.tls() ? ", not even a ClientHello" : "");
+      break;
     case slowhttp::Mode::SlowQuic: {
       auto* sq = new slowhttp::SlowQuic(
           cfg, cfg.quic_complete_hello ? slowhttp::SlowQuic::Hello::Complete

@@ -54,6 +54,16 @@ class Attack {
   // signalled as len == 0) means the server ended our slow request.
   virtual Action on_readable(ConnId id, const char* data, std::size_t len) = 0;
 
+  // A connection the attack was handed ended without the engine or the attack
+  // closing it: the peer closed or reset it, a read or write on it failed, or
+  // the event loop reported a hangup. Called just before on_close().
+  //
+  // on_close() alone cannot tell this apart from the engine's own closes --
+  // every attack connection is closed when the attack phase ends, so that the
+  // recovery probes see the target without load -- and an attack measuring how
+  // long the far end tolerated it would count those as the target's doing.
+  virtual void on_peer_close(ConnId /*id*/) {}
+
   // The connection slot was closed or dropped.
   virtual void on_close(ConnId /*id*/) {}
 

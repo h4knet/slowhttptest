@@ -45,8 +45,8 @@ rationale, and the roadmap.
   (`-P`/`--data`). The tool identifies itself in its User-Agent by default.
 - **Backward-compatible CLI flags** (`-H -B -R -X -u -c -r -l -i -x -s -t -f -m
   -j -1 -v -n -z -w -y -k -a -b -d -e -p -g -o -h`), plus `-P`, `--chunked`,
-  `--window-trickle`, `--expect-continue`, `--slow-tls`, `--slow-quic`
-  and `--probe-direct`.
+  `--window-trickle`, `--expect-continue`, `--slow-tls`, `--slow-quic`,
+  `-T`/`--connect-only` and `--probe-direct`.
 - **CMake** build with unit, smoke and end-to-end tests (`ctest`).
 - A **deliberately vulnerable mock server** (`tests/mock_slow_server.py`, http or
   https) and a **test proxy** (`tests/mock_proxy.py`), so you can watch a real
@@ -669,11 +669,11 @@ resident memory.
 > lands on the server's send path; the effective granularity is a TLS record
 > rather than `-z` bytes.
 
-## The seven modes, and why each is distinct
+## The eight modes, and why each is distinct
 
 Each mode attacks a different point in the request lifecycle, and — importantly —
 each is stopped by a *different* defense. That is the practical reason to keep all
-seven rather than collapsing them: a server hardened against one can be wide open
+eight rather than collapsing them: a server hardened against one can be wide open
 to the next.
 
 | Mode | What is withheld | Server blocks in | Defense |
@@ -685,6 +685,7 @@ to the next.
 | `--expect-continue` | the body the server *agreed* to wait for | reading body | body timeout **after the interim response** |
 | `--slow-tls` | the end of the ClientHello | the TLS handshake | **handshake** timeout — on a terminator |
 | `--slow-quic` | the end of the QUIC handshake | holding connection state | **address validation** (Retry), not a timeout |
+| `-T` connect only | the first byte, and everything after it | waiting for a request to begin | any timeout on silence, **starting at accept** |
 
 `tests/e2e_attacks.py` asserts exactly this, including the negative results: a
 header timeout demonstrably does **not** defend against slow body or slow read,
@@ -706,6 +707,10 @@ python3 tests/mock_slow_server.py 8080 --workers 4
 
 # slow TLS: the handshake never completes, so no HTTP timeout is ever reached
 ./build/slowhttptest-ng --slow-tls -u https://127.0.0.1:8443/ -c 12 -i 5 -l 60
+
+# connect only: the connection opens and nothing is ever sent on it, not even
+# a ClientHello over https. The run reports how long the far end waited.
+./build/slowhttptest-ng -T -u http://127.0.0.1:8080/ -c 12 -l 60
 
 # range: a 13 KB request naming 2002 overlapping ranges
 python3 tests/mock_slow_server.py 8080 --workers 4 --body-bytes 1000000
@@ -730,6 +735,29 @@ python3 tests/mock_slow_server.py 8080 --workers 4 --body-bytes 1000000
 > modern deployment, and the layer whose timeouts are least often revisited.
 > Against an origin serving its own TLS it may simply measure the same clock
 > twice, and the run will look like slow headers because it is.
+
+> **On connect only:** every other mode sends something the moment a
+> connection is up, so none of them reaches the clock that runs from `accept()`
+> to the first byte. `-T` is that clock alone, and therefore the floor of the
+> family: any timeout on silence defeats it, including a per-read inactivity
+> timeout that `-H` can outlast by sending a byte per interval. A target that
+> holds these connections for the whole run has no timeout before the first byte
+> at all. The run ends with what the far end did about the silence:
+>
+> ```
+> connect only: nothing was sent on any of 28 connection(s)
+>   ended by the far end (closed or reset): 20, after 4.0s of silence (median; 2.0-4.0s)
+>   still open when the attack stopped: 8, the oldest after 4.0s of silence
+> ```
+>
+> That run was against `mock_slow_server.py --workers 4 --header-timeout 2` with
+> `-c 8`: the 4.0s median is the 2s timeout plus 2s spent in the accept queue
+> waiting for a worker, which is how long a silent connection really occupies
+> this server, seen from outside. If no connection lasts a second, the verdict
+> says nothing was held. Nothing is sent, so a NAT or firewall that forgets a
+> flow without a reset goes unnoticed, and through `-d` the URL must be
+> `https://`: a plain-http proxy only connects to the origin after reading a
+> request.
 
 > **On the range attack:** CVE-2011-3192 was patched in 2011, so against a current
 > server this is a regression check ("is this still vulnerable?"), not a live

@@ -101,6 +101,7 @@ add_library(slowhttp STATIC
   src/attacks/slow_body.cpp
   src/attacks/expect_continue.cpp
   src/attacks/slow_tls.cpp
+  src/attacks/connect_only.cpp
   src/attacks/slow_quic.cpp
   src/attacks/range.cpp
   src/config/cli.cpp
@@ -195,6 +196,11 @@ add_test(NAME expect_continue_unit COMMAND test_expect_continue)
 add_executable(test_slow_tls tests/test_slow_tls.cpp)
 target_link_libraries(test_slow_tls PRIVATE slowhttp)
 add_test(NAME slow_tls_unit COMMAND test_slow_tls)
+
+add_executable(test_connect_only tests/test_connect_only.cpp)
+target_link_libraries(test_connect_only PRIVATE slowhttp)
+add_test(NAME connect_only_unit COMMAND test_connect_only)
+set_tests_properties(connect_only_unit PROPERTIES LABELS "unit")
 
 add_executable(test_quic tests/test_quic.cpp)
 target_link_libraries(test_quic PRIVATE slowhttp)

@@ -24,6 +24,11 @@ SECTIONS = [
         ("-B", "slow body a.k.a. R-U-Dead-Yet"),
         ("-R", "range attack a.k.a. Apache killer"),
         ("-X", "slow read"),
+        ("-T, --connect-only", "connect and send nothing at all, not even a "
+                               "TLS ClientHello; tests the clock from "
+                               "accept() to the first byte, and reports how "
+                               "long the far end tolerated the silence. "
+                               "Through -d it needs an https:// URL"),
         ("--rapid-reset", "HTTP/2 rapid reset (CVE-2023-44487); implies --http2"),
         ("--continuation-flood", "HTTP/2 CONTINUATION flood; implies --http2"),
         ("--expect-continue", "send Expect: 100-continue and then no body "

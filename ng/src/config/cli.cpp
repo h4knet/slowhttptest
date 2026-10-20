@@ -62,6 +62,7 @@ const char* mode_name(Mode m) {
     case Mode::ExpectContinue: return "expect 100-continue";
     case Mode::SlowTls: return "slow TLS handshake";
     case Mode::SlowQuic: return "slow QUIC handshake";
+    case Mode::ConnectOnly: return "connect only (nothing sent)";
     case Mode::SlowRead:    return "slow read";
     case Mode::Range:       return "range (Apache killer)";
     case Mode::RapidReset:  return "HTTP/2 rapid reset";
@@ -109,6 +110,11 @@ void print_usage() {
       "  -B                      slow body a.k.a. R-U-Dead-Yet\n"
       "  -R                      range attack a.k.a. Apache killer\n"
       "  -X                      slow read\n"
+      "  -T, --connect-only      connect and send nothing at all, not even a TLS\n"
+      "                          ClientHello; tests the clock from accept() to the\n"
+      "                          first byte, and reports how long the far end\n"
+      "                          tolerated the silence. Through -d it needs an\n"
+      "                          https:// URL\n"
       "  --rapid-reset           HTTP/2 rapid reset (CVE-2023-44487); implies --http2\n"
       "  --continuation-flood    HTTP/2 CONTINUATION flood; implies --http2\n"
       "  --expect-continue       send Expect: 100-continue and then no body at all,\n"
@@ -515,6 +521,7 @@ const struct option kLongOptions[] = {
     {"expect-continue", no_argument, nullptr, kOptExpectContinue},
     {"slow-tls", no_argument, nullptr, kOptSlowTls},
     {"slow-quic", no_argument, nullptr, kOptSlowQuic},
+    {"connect-only", no_argument, nullptr, 'T'},
     {"quic-hello", required_argument, nullptr, kOptQuicHello},
     {"probe-direct", no_argument, nullptr, kOptProbeDirect},
     {"window-trickle", required_argument, nullptr, kOptWindowTrickle},
@@ -576,13 +583,14 @@ CliResult parse_cli(int argc, char** argv, Config& cfg) {
   optind = 1;
   while ((o = getopt_long(
               argc, argv,
-              ":HBRXghqV46c:r:l:i:x:s:t:f:m:j:u:v:n:z:w:y:k:a:b:1:d:e:p:o:P:A:",
+              ":HBRXTghqV46c:r:l:i:x:s:t:f:m:j:u:v:n:z:w:y:k:a:b:1:d:e:p:o:P:A:",
               kLongOptions, nullptr)) != -1) {
     switch (o) {
       case 'H': cfg.mode = Mode::SlowHeaders; break;
       case 'B': cfg.mode = Mode::SlowBody; break;
       case 'R': cfg.mode = Mode::Range; break;
       case 'X': cfg.mode = Mode::SlowRead; break;
+      case 'T': cfg.mode = Mode::ConnectOnly; break;
       case 'u': url = optarg; break;
       // Deliberately higher than classic's cap, and not drift: classic may be
       // built against select(), which cannot watch a descriptor at or above
@@ -1024,6 +1032,28 @@ CliResult parse_cli(int argc, char** argv, Config& cfg) {
                    "       nor -e applies to it.\n");
       return CliResult::kError;
     }
+  }
+
+  // Plain http through -d has no tunnel: the request line is rewritten into
+  // absolute-URI form and the proxy opens its own connection to the origin
+  // once it has read one. A connection that sends nothing never gets that far,
+  // so every one of them would be held by the proxy while the run reported on
+  // the target. https is fine -- the CONNECT exchange is with the proxy, and
+  // what reaches the origin through the tunnel is the silence itself.
+  if (cfg.mode == Mode::ConnectOnly && cfg.proxy.enabled() &&
+      !cfg.target.tls()) {
+    std::fprintf(stderr,
+                 "Error: -T cannot go through -d with an http:// target.\n"
+                 "       A plain-http proxy only connects to the origin once it"
+                 " has read a\n"
+                 "       request, and -T never sends one, so every connection"
+                 " would be held by\n"
+                 "       the proxy rather than the target. Use an https:// URL,"
+                 " where -d is a\n"
+                 "       CONNECT tunnel to the origin, or drop -d and aim -u at"
+                 " the proxy itself\n"
+                 "       if the proxy is what you mean to test.\n");
+    return CliResult::kError;
   }
 
   if (cfg.mode == Mode::SlowTls && !cfg.target.tls()) {

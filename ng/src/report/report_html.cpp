@@ -794,6 +794,10 @@ std::string render_html(const EventLog& log, const Verdict& v) {
                      ? " — kernel overrode the requested window, so -w/-y were"
                        " not in force"
                      : ""));
+  } else if (m.mode_flag == "-T") {
+    // -i is parsed but nothing is ever sent, so an interval here would
+    // describe follow-up data that does not exist.
+    param("Data sent", "none — each connection is opened and held silent");
   } else {
     param("Followup interval", std::to_string(m.interval_s) + " s (-i)");
   }

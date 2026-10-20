@@ -12,6 +12,8 @@ machinery around them is honest:
   * the capacity staircase brackets the denial threshold around the worker count
   * a target that is already unhealthy yields "inconclusive", not a finding
   * the HTML and JSON reports agree and the HTML fetches nothing at view time
+  * -T puts not one byte on the wire, over http, https or a CONNECT tunnel, and
+    times the far end's patience correctly
 
 The last two are the ones worth having. A tool that reports a confident verdict
 when it could not measure anything is worse than one that reports nothing.
@@ -21,6 +23,7 @@ Usage: e2e_transport.py <slowhttptest-ng> <mock_slow_server.py> <mock_proxy.py>
 import json
 import os
 import re
+import select
 import shutil
 import socket
 import ssl
@@ -567,6 +570,170 @@ def case_slow_tls_refuses_cleartext(tool, port):
     ok("slow tls refuses cleartext")
 
 
+def _silence_spy(port, seconds, out, close_after=None):
+    """A listener that records how many bytes each connection delivered.
+
+    The one thing -T must never do is send, so every byte from every
+    connection is counted here rather than taken from the tool's own account.
+    With close_after it also plays a server with a timeout on silence: each
+    connection is closed that many seconds after it was accepted, having been
+    sent nothing, so the tool's measurement of the far end's patience can be
+    checked against a value known in advance.
+    """
+    srv = socket.socket()
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    srv.bind(("127.0.0.1", port))
+    srv.listen(128)
+    srv.setblocking(False)
+    conns = []  # [socket, accepted_at, bytes_received, closed]
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        live = [c[0] for c in conns if not c[3]]
+        ready, _, _ = select.select([srv] + live, [], [], 0.05)
+        for sock in ready:
+            if sock is srv:
+                try:
+                    c, _ = srv.accept()
+                except OSError:
+                    continue
+                c.setblocking(False)
+                conns.append([c, time.time(), 0, False])
+                continue
+            entry = next(e for e in conns if e[0] is sock)
+            try:
+                data = sock.recv(65536)
+            except OSError:
+                continue
+            if data:
+                entry[2] += len(data)
+            else:  # the client hung up
+                entry[3] = True
+                sock.close()
+        if close_after is not None:
+            now = time.time()
+            for e in conns:
+                if not e[3] and now - e[1] >= close_after:
+                    e[3] = True
+                    e[0].close()
+    for e in conns:
+        out.append(e[2])
+        if not e[3]:
+            e[0].close()
+    srv.close()
+
+
+def _run_against_spy(tool, port, args, spy_seconds, close_after=None):
+    """Runs the tool while a spy listens on `port`; returns (rc, err, seen)."""
+    seen = []
+    t = threading.Thread(target=_silence_spy,
+                         args=(port, spy_seconds, seen, close_after),
+                         daemon=True)
+    t.start()
+    time.sleep(0.3)
+    rc, err = run_tool(tool, args, timeout=90)
+    t.join(timeout=spy_seconds + 10)
+    return rc, err, seen
+
+
+def case_connect_only_sends_nothing(tool, port, scheme="http"):
+    """-T must hold connections without delivering a single byte.
+
+    Including over https://, where the obvious mistake would be to let the
+    library run its handshake first: a ClientHello is a first byte like any
+    other. Held, too -- a tool that connected and immediately hung up would
+    also deliver nothing, so the connections must survive the run.
+    """
+    name = "connect only sends nothing (%s)" % scheme
+    conns = 6
+    rc, err, seen = _run_against_spy(
+        tool, port, ["-T", "-u", "%s://127.0.0.1:%d/" % (scheme, port),
+                     "-c", str(conns), "-l", "6", "--no-probe"], 12)
+    if rc != 0:
+        return fail(name, "exit code %s: %s" % (rc, err[-300:]))
+    if len(seen) != conns:
+        return fail(name, "spy saw %d connection(s), wanted %d -- with nothing "
+                          "ending them there should be no reconnects"
+                    % (len(seen), conns))
+    if any(seen):
+        return fail(name, "bytes delivered per connection: %s" % seen)
+    ready = summary_counter(err, "attack_ready")
+    closed = summary_counter(err, "peer_closed")
+    if ready != conns or closed != 0:
+        return fail(name, "attack_ready=%s peer_closed=%s, wanted %d and 0"
+                    % (ready, closed, conns))
+    if "nothing was sent on any of %d connection(s)" % conns not in err:
+        return fail(name, "the run did not report what it sent")
+    if "ended by the far end (closed or reset): none" not in err:
+        return fail(name, "the run credited the target with closes it never made")
+    if "HINT:" in err:
+        return fail(name, "a scheme hint fired for a run that sent no request")
+    ok(name, "%d connection(s) held, 0 bytes delivered" % conns)
+
+
+def case_connect_only_times_the_far_end(tool, port):
+    """The far end's patience is the measurement, so it is checked against a
+    known one: a listener that closes every connection after 1.5s of silence.
+    """
+    name = "connect only times the far end"
+    rc, err, seen = _run_against_spy(
+        tool, port, ["-T", "-u", "http://127.0.0.1:%d/" % port, "-c", "4",
+                     "-l", "8", "--no-probe"], 14, close_after=1.5)
+    if rc != 0:
+        return fail(name, "exit code %s: %s" % (rc, err[-300:]))
+    if not seen or any(seen):
+        return fail(name, "bytes delivered per connection: %s" % seen)
+    m = re.search(r"ended by the far end \(closed or reset\): (\d+), after "
+                  r"([\d.]+)s of silence", err)
+    if not m:
+        return fail(name, "no hold time reported: %r" % err[-400:])
+    ended, median = int(m.group(1)), float(m.group(2))
+    # Four slots, each refilled as soon as it is dropped: several rounds of
+    # 1.5s fit in 8s. The upper bound leaves room for the listener's 50 ms
+    # polling and the event loop's wakeup; nothing else should add to 1.5s.
+    if ended < 8:
+        return fail(name, "only %d close(s) seen in 8s of 1.5s timeouts" % ended)
+    if not 1.3 <= median <= 2.0:
+        return fail(name, "median %.1fs for a far end that waits 1.5s" % median)
+    if summary_counter(err, "peer_closed") != ended:
+        return fail(name, "summary says %d, the engine counted %s"
+                    % (ended, summary_counter(err, "peer_closed")))
+    ok(name, "%d closes, median %.1fs against a 1.5s timeout" % (ended, median))
+
+
+def case_connect_only_through_connect(tool, proxy_script, port, pport):
+    """Through -d the CONNECT exchange is with the proxy; the origin must still
+    receive nothing at all."""
+    name = "connect only through CONNECT"
+    proxy = subprocess.Popen([sys.executable, proxy_script, str(pport)],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        if not wait_until(lambda: _port_listening(pport), timeout=10):
+            return fail(name, "proxy never started")
+        conns = 4
+        rc, err, seen = _run_against_spy(
+            tool, port, ["-T", "-u", "https://127.0.0.1:%d/" % port,
+                         "-d", "127.0.0.1:%d" % pport, "-c", str(conns),
+                         "-l", "6", "--no-probe"], 12)
+        if rc != 0:
+            return fail(name, "exit code %s: %s" % (rc, err[-300:]))
+        if len(seen) != conns or any(seen):
+            return fail(name, "origin saw %s, wanted %d silent connection(s)"
+                        % (seen, conns))
+        if "nothing was sent through the tunnel" not in err:
+            return fail(name, "the summary did not say the silence was tunnelled")
+        ok(name, "%d tunnel(s), 0 bytes at the origin" % conns)
+    finally:
+        terminate(proxy)
+
+
+def _port_listening(port):
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=1):
+            return True
+    except OSError:
+        return False
+
+
 def case_capacity(tool, mock, port):
     """The staircase must bracket the threshold around the server's worker count."""
     server, log = start_server(mock, port, workers=8)
@@ -880,6 +1047,10 @@ def main():
     case_peer_close_detected(tool, mock, free_port())
     case_held_not_overcounted(tool, mock, free_port())
 
+    print("e2e: connect only (-T)")
+    case_connect_only_sends_nothing(tool, free_port())
+    case_connect_only_times_the_far_end(tool, free_port())
+
     print("e2e: reporting")
     case_reports(tool, mock, free_port(), tmpdir)
     case_interrupt(tool, mock, free_port(), tmpdir)
@@ -900,6 +1071,9 @@ def main():
             case_probe_alpn(tool, cert, key, free_port())
             case_slow_tls(tool, cert, key, free_port())
             case_slow_tls_refuses_cleartext(tool, free_port())
+            case_connect_only_sends_nothing(tool, free_port(), scheme="https")
+            case_connect_only_through_connect(tool, proxy_script, free_port(),
+                                              free_port())
 
     shutil.rmtree(tmpdir, ignore_errors=True)
     if failures:

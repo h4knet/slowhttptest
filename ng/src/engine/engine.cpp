@@ -814,8 +814,13 @@ struct Engine::Impl {
   double close_syscall_s = 0;
   double close_bookkeep_s = 0;
 
-  void close_slot(Conn& c) {
+  // `by_peer`: the far end ended a connection rather than this engine or the
+  // attack -- a FIN, a reset, a failed read or write, a hangup. The attack is
+  // told so only for a connection it was handed (on_connect() ran); one that
+  // never got through setup is a connect or setup failure, counted elsewhere.
+  void close_slot(Conn& c, bool by_peer = false) {
     if (!c.active) return;
+    const bool was_ready = c.sock.ready();
     const TimePoint t0 = Clock::now();
     cancel_timer(c);
     if (c.sock.fd() >= 0) {
@@ -838,6 +843,7 @@ struct Engine::Impl {
     c.outbuf.clear();
     c.outpos = 0;
     --active_conns;
+    if (by_peer && was_ready) attack.on_peer_close(c.id);
     attack.on_close(c.id);
   }
 
@@ -990,7 +996,7 @@ struct Engine::Impl {
       } else if (n == 0) {
         break;  // would block; wait for next writable
       } else {
-        close_slot(c);
+        close_slot(c, /*by_peer=*/true);
         return;
       }
     }
@@ -1015,11 +1021,11 @@ struct Engine::Impl {
     }
     if (n == 0) {  // server finished the response and closed
       ++peer_closed_total;
-      close_slot(c);
+      close_slot(c, /*by_peer=*/true);
       return false;
     }
     if (n == -1) return true;  // nothing buffered yet; try again next tick
-    close_slot(c);
+    close_slot(c, /*by_peer=*/true);
     return false;
   }
 
@@ -1259,12 +1265,12 @@ struct Engine::Impl {
         if (!c.active) return;
       } else if (n == 0) {
         ++peer_closed_total;
-        close_slot(c);
+        close_slot(c, /*by_peer=*/true);
         return;
       } else if (n == -1) {
         return;  // would block
       } else {
-        close_slot(c);
+        close_slot(c, /*by_peer=*/true);
         return;
       }
     }
@@ -1377,7 +1383,7 @@ struct Engine::Impl {
       if (check_peer_closed && c.sock.peer_has_closed()) {
         trace(3, "conn %d: peer closed, connection is holding nothing", c.id);
         ++peer_closed_total;
-        close_slot(c);
+        close_slot(c, /*by_peer=*/true);
       }
     }
   }
@@ -1617,6 +1623,11 @@ struct Engine::Impl {
   // question and printed alongside the results rather than replacing them.
   void scheme_mismatch_hint() const {
     if (!chatty()) return;
+    // -T sends nothing, so there is no request whose scheme could be wrong. A
+    // connection it opened being closed with nothing sent back is a timeout on
+    // silence -- the very thing the mode measures -- and the first test below
+    // would read it as a TLS listener rejecting cleartext.
+    if (cfg.mode == Mode::ConnectOnly) return;
 
     // http:// against a TLS listener: the handshake we never send means the
     // server closes on our cleartext request, every time, without ever replying.
@@ -1820,8 +1831,10 @@ struct Engine::Impl {
       if (!tls) return false;
       // The context is still built under --slow-tls and --slow-quic: the
       // availability probe needs it, and it stays on TCP. Only the attack's
-      // own sockets skip it -- see above.
-      if (cfg.mode != Mode::SlowTls && cfg.mode != Mode::SlowQuic) {
+      // own sockets skip it -- see above. -T skips it too: a ClientHello is a
+      // first byte like any other, and -T sends none.
+      if (cfg.mode != Mode::SlowTls && cfg.mode != Mode::SlowQuic &&
+          cfg.mode != Mode::ConnectOnly) {
         plan.tls = tls;
         plan.sni = cfg.target.host;
       }
@@ -1856,6 +1869,7 @@ struct Engine::Impl {
                                  ? "--slow-quic --quic-hello complete"
                                  : "--slow-quic";
         break;
+      case Mode::ConnectOnly: log.meta.mode_flag = "-T"; break;
     }
     // A flag that does not reproduce the run is worse than none: -X alone
     // describes a different attack from the one that was carried out.
@@ -2068,9 +2082,10 @@ struct Engine::Impl {
       row(cfg.needs_udp() ? "number of udp flows:" : "number of connections:",
           "%d", cfg.connections);
       row("URL:", "%s", log.meta.target_url.c_str());
-      // Not under --slow-tls or --slow-quic: no HTTP request is ever sent,
-      // and naming a verb implied one was.
-      if (cfg.mode != Mode::SlowTls && cfg.mode != Mode::SlowQuic)
+      // Not under --slow-tls, --slow-quic or -T: no HTTP request is ever
+      // sent, and naming a verb implied one was.
+      if (cfg.mode != Mode::SlowTls && cfg.mode != Mode::SlowQuic &&
+          cfg.mode != Mode::ConnectOnly)
         row("verb:", "%s", cfg.effective_verb().c_str());
       row("resolved address:", "%s (%zu candidate%s)",
           ResolvedAddr::describe(current_addr()).c_str(),
@@ -2089,6 +2104,10 @@ struct Engine::Impl {
               cfg.window_upper);
         row("read rate from receive buffer:", "%d bytes / %lld sec",
             cfg.read_len, static_cast<long long>(cfg.read_interval.count()));
+      } else if (cfg.mode == Mode::ConnectOnly) {
+        // There is no follow-up data to space out, and an interval printed
+        // here would say there was.
+        row("data sent per connection:", "%s", "none");
       } else {
         row("interval between follow up data:", "%lld seconds",
             static_cast<long long>(cfg.interval.count()));
@@ -2315,7 +2334,7 @@ struct Engine::Impl {
             if (!c->active) continue;
           }
           ++peer_closed_total;
-          close_slot(*c);
+          close_slot(*c, /*by_peer=*/true);
           continue;
         }
         if (ev.writable) on_writable(*c);

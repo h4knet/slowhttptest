@@ -224,6 +224,68 @@ static void test_mode_specific_flags_are_refused_outside_their_mode() {
   }
 }
 
+static void test_connect_only_flags() {
+  {
+    Config cfg;
+    check(run({"slowhttptest-ng", "-T"}, cfg) == CliResult::kRun, "-T selects a mode");
+    check(cfg.mode == Mode::ConnectOnly, "-T is connect only");
+    check(std::strcmp(slowhttp::mode_name(cfg.mode), "unknown") != 0,
+          "and the mode has a name for the banner and the report");
+  }
+  {
+    Config cfg;
+    check(run({"slowhttptest-ng", "--connect-only"}, cfg) == CliResult::kRun &&
+              cfg.mode == Mode::ConnectOnly,
+          "--connect-only is the long spelling of -T");
+  }
+  {  // Nothing is sent, TLS included, so an https:// URL needs no handshake
+     // support and is not refused the way --slow-tls refuses http://.
+    Config cfg;
+    check(run({"slowhttptest-ng", "-T", "-u", "https://example.test/"}, cfg) ==
+              CliResult::kRun,
+          "-T accepts an https:// URL");
+  }
+  {  // A plain-http proxy connects to the origin only after reading a request,
+     // and -T never sends one: every connection would be held by the proxy.
+    Config cfg;
+    check(run({"slowhttptest-ng", "-T", "-d", "127.0.0.1:3128", "-u",
+               "http://example.test/"}, cfg) == CliResult::kError,
+          "-T through -d with an http:// target is refused");
+  }
+  {  // Through CONNECT the silence itself reaches the origin.
+    Config cfg;
+    check(run({"slowhttptest-ng", "-T", "-d", "127.0.0.1:3128", "-u",
+               "https://example.test/"}, cfg) == CliResult::kRun,
+          "-T through a CONNECT tunnel is allowed");
+  }
+  {  // -e moves only the probe, which does send requests.
+    Config cfg;
+    check(run({"slowhttptest-ng", "-T", "-e", "127.0.0.1:3128", "-u",
+               "http://example.test/"}, cfg) == CliResult::kRun,
+          "-T with a probe-only proxy is allowed");
+  }
+  {
+    Config cfg;
+    check(run({"slowhttptest-ng", "-T", "--http2"}, cfg) == CliResult::kError,
+          "-T has no HTTP/2 form: there is no framing in a connection that "
+          "sends nothing");
+  }
+  {
+    Config cfg;
+    check(run({"slowhttptest-ng", "-T", "-P", "x=1"}, cfg) == CliResult::kError,
+          "-P is refused: a body would never be sent");
+  }
+  {  // Like every other mode letter, the last one given wins.
+    Config cfg;
+    check(run({"slowhttptest-ng", "-T", "-H"}, cfg) == CliResult::kRun &&
+              cfg.mode == Mode::SlowHeaders,
+          "a later mode flag replaces -T");
+    check(run({"slowhttptest-ng", "-H", "-T"}, cfg) == CliResult::kRun &&
+              cfg.mode == Mode::ConnectOnly,
+          "and -T replaces an earlier one");
+  }
+}
+
 static void test_proxy_flags() {
   {
     Config cfg;
@@ -783,6 +845,7 @@ int main() {
   test_url_parsing();
   test_flags();
   test_mode_specific_flags_are_refused_outside_their_mode();
+  test_connect_only_flags();
   test_proxy_flags();
   test_host_header();
   test_referer();

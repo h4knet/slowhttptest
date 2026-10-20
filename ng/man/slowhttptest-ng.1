@@ -13,7 +13,7 @@
 .\"  See the License for the specific language governing permissions and
 .\"  limitations under the License.
 .\"
-.Dd August 29, 2026
+.Dd October 20, 2026
 .Dt SLOWHTTPTEST-NG 1
 .Os
 .Sh NAME
@@ -22,7 +22,7 @@
 .Sh SYNOPSIS
 .Nm
 .Bk -words
-.Op Fl H | B | R | X
+.Op Fl H | B | R | X | T
 .Op Fl \-http2 | \-rapid-reset | \-continuation-flood
 .Op Fl u Ar url
 .Op Fl c Ar connections
@@ -93,6 +93,52 @@ response, advertising a tiny TCP receive window.
 The server blocks
 .Em sending .
 Neither a header nor a body timeout helps; the defense is a send timeout.
+.It Fl T , Fl \-connect-only
+Connect, then send nothing at all.
+Every other mode puts bytes on the wire as soon as a connection is up, so none
+of them exercises what a server does with a connection that has said nothing:
+the clock that runs from
+.Fn accept
+to the first byte.
+Not even TLS is started on an
+.Sy https
+URL, since a ClientHello is a first byte like any other; the availability probe
+still performs a real handshake.
+.Pp
+This is the floor of the slow modes.
+Anything that bounds silence defeats it, including a per-read inactivity
+timeout that
+.Fl H
+can outlast by sending a byte per interval, so a target that holds these
+connections indefinitely has no timeout before the first byte at all.
+What that costs it depends on what owns a silent connection: a
+thread-per-connection server spends a worker on each, an event-driven one very
+little, and a kernel deferring accept until the first byte
+.Pq Dv TCP_DEFER_ACCEPT No on Linux
+keeps it from the server process until its defer period runs out.
+.Pp
+At the end of the run
+.Nm
+reports how many connections the far end closed or reset and after how long,
+as a median and a range; how many were still open when the attack stopped; and
+the first line of anything the far end sent unprompted, such as a
+.Sy 408
+or a protocol banner.
+If no connection lasted a second, the verdict says that nothing was held.
+.Pp
+Nothing is sent, so a path that forgets the flow without a reset, such as a NAT
+or firewall idle timeout, goes unnoticed: those connections stay counted as
+held.
+There is no request to carry a User-Agent either, so these connections are
+anonymous in the target's logs; the probe's requests still name the tool.
+.Pp
+Through
+.Fl d
+the URL must be
+.Sy https :
+the CONNECT exchange is with the proxy and the origin receives nothing, whereas
+a plain-http proxy only connects to the origin after reading a request, so every
+connection would be held by the proxy instead.
 .It Fl -expect-continue
 Sends a complete, valid request carrying
 .Sy Expect: 100-continue
@@ -306,6 +352,9 @@ Default 240.
 .It Fl i Ar seconds
 Interval between followup data.
 Default 10.
+Unused under
+.Fl T ,
+which sends none.
 .It Fl x Ar bytes
 Maximum length of each randomized name/value pair of followup data.
 Default 32.
@@ -942,6 +991,11 @@ jq -e '.criterion.pass' report.json
 Attack directly, but measure availability from another network path:
 .Bd -literal -offset indent
 slowhttptest-ng -u http://target.example/ -e probe-proxy.local:3128 -c 200
+.Ed
+.Pp
+Hold connections that never send a byte, and see how long the target waits:
+.Bd -literal -offset indent
+slowhttptest-ng -T -u https://target.example/ -c 500 -l 300
 .Ed
 .Sh COMPATIBILITY
 .Nm

@@ -11,7 +11,8 @@
 namespace slowhttp {
 
 enum class Mode { SlowHeaders, SlowBody, SlowRead, Range, RapidReset,
-                 Continuation, ExpectContinue, SlowTls, SlowQuic };
+                 Continuation, ExpectContinue, SlowTls, SlowQuic,
+                 ConnectOnly };
 
 const char* mode_name(Mode m);
 
@@ -292,6 +293,8 @@ struct Config {
       // Same for --slow-quic: the handshake stops long before HTTP/3 has a
       // request to carry a verb in.
       case Mode::SlowQuic: return "GET";
+      // And for -T, which never sends a byte, let alone a request line.
+      case Mode::ConnectOnly: return "GET";
       case Mode::Range:    return "HEAD";
       case Mode::RapidReset: return "GET";
       case Mode::Continuation: return "GET";

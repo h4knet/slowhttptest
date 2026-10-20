@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""End-to-end regression tests for all four attack modes.
+"""End-to-end regression tests for the four HTTP/1.1 attack modes and -T.
 
 Each attack is checked against a deliberately vulnerable local server, plus a
 negative control showing the matching defense stops it. The controls matter: a bug
@@ -306,6 +306,16 @@ def main():
     # The matching defense is a send timeout.
     run_case("send timeout defends", tool, mock, free_port(), "-X",
              big + ("--send-timeout", "2"), slow_read_args, expect_progress=True)
+
+    print("e2e: connect only (nothing sent)")
+    # Workers pinned waiting for a first byte that never comes. Nothing is
+    # dribbled, so this is the hold with no help from the client at all.
+    run_case("vulnerable is wedged", tool, mock, free_port(), "-T", (), (),
+             expect_progress=False, saturation_field=0)
+    # The mock's header timeout bounds every read of the request, the first
+    # one included, so silent connections are reaped like slow headers are.
+    run_case("header timeout defends", tool, mock, free_port(), "-T",
+             ("--header-timeout", "2"), (), expect_progress=True)
 
     print("e2e: range (Apache killer)")
     run_range_case(tool, mock, free_port())
